@@ -11,7 +11,6 @@ def stime():
     return time.strftime('%Y-%m-%d__%H.%M.%S', time.localtime(ft)) + '__.' + tail
 
 def kill_process_tree(pid: int):
-    """Windows 下递归杀死进程树"""
     if sys.platform == "win32":
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -20,11 +19,9 @@ def kill_process_tree(pid: int):
             pass
 
 def looks_like_url(s: str) -> bool:
-    """判断是否为 Git 远程地址"""
     return s.startswith("https://") or s.startswith("git@") or "://" in s
 
 def parse_url_info(url: str):
-    """从 URL 中提取 remote_url（含认证）、auth 和 repo 路径"""
     parsed = urlparse(url)
     auth = None
     if "@" in parsed.netloc:
@@ -36,7 +33,6 @@ def parse_url_info(url: str):
     return remote_url, auth, repo_path
 
 def parse_size_str(val: str) -> int:
-    """解析大小字符串为字节数"""
     if not val:
         return 104857600
     s = str(val).strip().lower()
@@ -59,45 +55,90 @@ def parse_size_str(val: str) -> int:
 
 def preprocess_args():
     """
-    预处理参数：识别任意位置的远程 URL，并将其转换为 --remote 参数。
-    若 URL 前有单独的 '-u'，则一同移除（因为 -u 本意是传 URL，而非用户名）。
-    确保模式参数存在（若无则默认 push）。
+    通用参数预处理，支持任意顺序：
+      - 识别独立的 URL 并转换为 --remote <URL>
+      - 处理 -u/--user：
+          * 若后跟 URL，则转为 --user（无参，触发 AUTO）和 --remote <URL>
+          * 若后跟显式用户名，则保留 -u <用户名>
+          * 否则保留 -u（无参）
+      - 自动补全缺失的 mode（默认 push）
     """
     valid_modes = {"push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"}
-    args = sys.argv[1:]
-    url_index = -1
-    remote_url = None
-    # 查找第一个远程地址
-    for i, arg in enumerate(args):
+    raw = sys.argv[1:]
+
+    # 1. 收集所有 URL 的位置和值
+    url_indices = []
+    url_values = []
+    for i, arg in enumerate(raw):
         if looks_like_url(arg):
-            remote_url, _, _ = parse_url_info(arg)
-            url_index = i
-            break
-    if url_index == -1:
-        return sys.argv   # 无 URL，不做处理
+            url_indices.append(i)
+            url_values.append(arg)
 
-    # 如果 URL 前一个参数是 '-u'，则移除它
-    if url_index > 0 and args[url_index - 1] == "-u":
-        # 先移除 -u（此时 URL 索引会减 1）
-        args.pop(url_index - 1)
-        url_index -= 1
+    # 2. 构建新参数列表
+    new = []
+    i = 0
+    while i < len(raw):
+        arg = raw[i]
 
-    # 移除 URL
-    args.pop(url_index)
+        # 处理 -u / --user
+        if arg in ("-u", "--user"):
+            # 检查下一个参数是否是 URL（在 url_indices 中）
+            if i + 1 < len(raw) and (i + 1) in url_indices:
+                # 情况：-u <URL>
+                new.append("--user")          # 无参数，触发 const="AUTO"
+                new.append("--remote")
+                new.append(raw[i + 1])
+                i += 2
+                continue
+            else:
+                # -u 后不是 URL
+                # 检查下一个参数是否应作为用户名
+                if i + 1 < len(raw):
+                    nxt = raw[i + 1]
+                    # 如果下一个参数是 mode 或以 '-' 开头，则 -u 不带参数
+                    if nxt in valid_modes or nxt.startswith("-"):
+                        # -u 不带参数
+                        new.append(arg)
+                        i += 1
+                        continue
+                    else:
+                        # 否则视为用户名
+                        new.append(arg)
+                        new.append(nxt)
+                        i += 2
+                        continue
+                else:
+                    # -u 是最后一个参数，不带参数
+                    new.append(arg)
+                    i += 1
+                    continue
 
-    # 构建新参数列表：保留原脚本名，添加 --remote 和 URL
-    new_argv = [sys.argv[0], "--remote", remote_url]
+        # 处理独立的 URL（不在 -u 之后）
+        if looks_like_url(arg):
+            # 检查这个 URL 是否是被 -u 处理后跳过的那个（即它的前一个参数是 -u）
+            # 因为我们在上面遇到 -u 时已经跳过了 URL，所以这里不会重复添加
+            # 但为了安全，检查前一个参数是否为 -u 或 --user（在原始列表中）
+            if i > 0 and raw[i - 1] in ("-u", "--user"):
+                # 这个 URL 已经在 -u 分支处理过了，跳过
+                i += 1
+                continue
+            new.append("--remote")
+            new.append(arg)
+            i += 1
+            continue
 
-    # 确保存在模式参数
-    has_mode = any(arg in valid_modes for arg in args)
+        # 其他参数原样保留
+        new.append(arg)
+        i += 1
+
+    # 3. 确保存在 mode
+    has_mode = any(a in valid_modes for a in new)
     if not has_mode:
-        args.append("push")   # 默认推送
+        new.append("push")
 
-    new_argv.extend(args)
-    return new_argv
+    return [sys.argv[0]] + new
 
 def find_git(user_git: str) -> str:
-    """查找 git 可执行文件"""
     if user_git and Path(user_git).is_file():
         return user_git
     env_git = os.environ.get("GIT_PATH", "")
@@ -487,7 +528,6 @@ def git_remove_big(git_bin: str, threshold_bytes: int, target_hashes: list[str] 
         sys.exit(1)
 
 def main():
-    # 预处理参数：将 -u <URL> 或直接 <URL> 转为 --remote <URL>
     sys.argv = preprocess_args()
 
     default_git = os.environ.get("GIT_PATH", "git")
@@ -509,7 +549,6 @@ def main():
     git_exe = find_git(args.git)
     repo_root = Path.cwd()
 
-    # 优先级：命令行传入 > origin 配置 > 当前分支 tracking 远程（含直接 URL）
     remote_url = args.remote or get_origin_url(git_exe) or get_branch_tracking_url(git_exe, args.branch)
     if not remote_url and args.mode not in ("list-big", "listbig", "remove-big", "filter-repo"):
         print("[FATAL] 未提供远程仓库地址，且未找到 origin 或当前分支的 tracking 远程配置。")
