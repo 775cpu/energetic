@@ -2,6 +2,14 @@ import argparse, os, platform, shutil, subprocess, sys, time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+def stime():
+    ft=time.time()
+    sf=str(ft)
+    tail=sf.split('.')[1][:3]
+    while len(tail)<3:
+            tail='0'+tail
+    return time.strftime('%Y-%m-%d__%H.%M.%S',time.localtime(ft))+'__.'+tail
+
 def kill_process_tree(pid: int):
     """Windows 下递归杀死进程树"""
     if sys.platform == "win32":
@@ -297,8 +305,11 @@ def apply_git_user_config(git_bin: str, remote_url: str, user_arg: str):
             print("[INFO] 保持原配置不变。")
 
 def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
-             commit_msg: str = "auto update", remote_url: str = "",
-             user_arg: str = None, retry_count: int = 10):
+             commit_msg: str = "", remote_url: str = "",
+             user_arg: str = None, retry_count: int = 10,retry_seconds=5):
+    if not commit_msg:
+        commit_msg=f'{__file__} auto {stime()}'
+             
     print(f"\n[INFO] 当前工作目录: {repo_root.resolve()}")
     if not (repo_root / ".git").exists():
         print("\n[INFO] 检测到当前目录尚未初始化 Git 仓库，自动执行 git init...")
@@ -324,19 +335,18 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
         run_shell(git_bin, ["commit", "-m", commit_msg])
     cmd_args = ["push", "-v", "--progress"] + extra_args + [remote_url, branch]
     for attempt in range(1, retry_count + 1):
-        print(f"\n===== 推送 {remote_url} {branch} (尝试 {attempt}/{retry_count}) =====")
+        print(f"\n===== 推送 {remote_url} {branch} (尝试 {attempt}/{retry_count}) {stime()} 重试间隔 {retry_seconds}=====")
         try:
             push_res = run_shell(git_bin, cmd_args, realtime=True)
             if push_res.returncode == 0:
-                print("\n[INFO] ✅ 推送成功！")
+                print(f"\n[INFO] ✅ 推送成功！ {stime()}")
                 break
             else:
                 print(f"\n[WARN] ⚠️ 网络连接或推送失败 (返回码: {push_res.returncode})")
         except Exception as e:
             print(f"\n[WARN] ⚠️ 推送进程发生异常: {repr(e)}")
         if attempt < retry_count:
-            print("[INFO] 5秒后自动重试...")
-            time.sleep(5)
+            time.sleep(retry_seconds)
         else:
             print(f"\n[ERROR] ❌ 已达到最大重试次数 {retry_count}，终止操作。请检查网络。")
             sys.exit(1)
