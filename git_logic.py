@@ -7,7 +7,7 @@ def stime():
     sf=str(ft)
     tail=sf.split('.')[1][:3]
     while len(tail)<3:
-            tail='0'+tail
+        tail='0'+tail
     return time.strftime('%Y-%m-%d__%H.%M.%S',time.localtime(ft))+'__.'+tail
 
 def kill_process_tree(pid: int):
@@ -160,6 +160,18 @@ def check_lfs_available(git_bin: str) -> bool:
     res = run_shell(git_bin, ["lfs", "version"], realtime=False)
     return res.returncode == 0
 
+def is_lfs_initialized(repo_root: Path) -> bool:
+    """检查仓库是否已经执行过 git lfs install（钩子已就位）"""
+    hook_path = repo_root / ".git" / "hooks" / "pre-push"
+    if hook_path.exists():
+        try:
+            content = hook_path.read_text(encoding='utf-8', errors='ignore')
+            if 'git-lfs' in content:
+                return True
+        except Exception:
+            pass
+    return False
+
 def install_lfs() -> bool:
     system = platform.system()
     print("\n[INFO] 检测到大文件，但未找到 Git LFS，尝试自动安装...")
@@ -308,7 +320,7 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
              commit_msg: str = "", remote_url: str = "",
              user_arg: str = None, retry_count: int = 10,retry_seconds=5):
     if not commit_msg:
-        commit_msg=f'{__file__} auto {stime()}'
+        commit_msg=f'{__file__[-20:]} auto {stime()}'
              
     print(f"\n[INFO] 当前工作目录: {repo_root.resolve()}")
     if not (repo_root / ".git").exists():
@@ -437,7 +449,7 @@ def main():
     parser.add_argument("--hashes", "--hash", default="", help="手动要清理的 Blob Hash（多个用逗号隔开）")
     parser.add_argument("--remote", default="", help="完整远程 URL")
     parser.add_argument("--auth", help="认证信息 user:token")
-    parser.add_argument("--commit-msg",'-m', default="", help="自定义 commit 消息")
+    parser.add_argument("--commit-msg","--commit_msg",'-m', default="", help="自定义 commit 消息")
     parser.add_argument("--user", "-u", nargs="?", const="AUTO", default=None, help="自动配置 Git 用户")
     parser.add_argument("--retry", "-r", type=int, default=10, help="网络断开或 Push 失败时的重试次数 (默认 10)")
     parser.add_argument("mode", choices=["push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"], help="操作模式")
@@ -489,9 +501,13 @@ def main():
                 print("[FATAL] Git LFS 安装后仍然不可用，请检查环境。")
                 sys.exit(1)
             lfs_available = True
+        # 只有钩子尚未初始化时才执行 git lfs install，避免重复输出
         if lfs_needed or lfs_available:
-            if not init_lfs(git_exe):
-                sys.exit(1)
+            if is_lfs_initialized(repo_root):
+                print("[INFO] Git LFS hooks 已初始化，跳过 git lfs install")
+            else:
+                if not init_lfs(git_exe):
+                    sys.exit(1)
         if lfs_needed:
             clean_and_apply_lfs(git_exe, repo_root, large_files)
         if remote_url:
