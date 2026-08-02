@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -292,24 +293,40 @@ def git_pull(git_bin: str, branch: str, extra_args: list[str], remote_url: str =
     run_shell(git_bin, ["lfs", "pull"], realtime=True)
 
 
-def check_and_fix_git_config(git_bin: str, remote_url: str):
-    """检查 git config 的用户名是否与远程 URL 的用户名一致"""
+def apply_git_user_config(git_bin: str, remote_url: str, user_arg: str):
+    """处理 Git 用户名和邮箱配置"""
     if not remote_url:
         return
         
     parsed = urlparse(remote_url)
     remote_user = parsed.username
     
-    # 如果 URL 凭证中没写用户名，尝试从路径中提取 (例如 github.com/775cpu/energetic.git)
+    # 从 URL 中提取目标 user (例如 github.com/775cpu/energetic.git -> 775cpu)
     if not remote_user:
         path_parts = [p for p in parsed.path.strip("/").split("/") if p]
         if path_parts:
             remote_user = path_parts[0]
 
+    # 情况 1: 用户指定了 -u (包括带有值或者不带值的单纯 -u)
+    if user_arg is not None:
+        if user_arg == "AUTO":
+            target_user = remote_user
+            if not target_user:
+                print("[WARN] 无法从远程 URL 中提取到用户名，回退为 'git_user'")
+                target_user = "git_user"
+        else:
+            target_user = user_arg
+            
+        target_email = f"{target_user}@users.noreply.github.com"
+        run_shell(git_bin, ["config", "user.name", target_user])
+        run_shell(git_bin, ["config", "user.email", target_email])
+        print(f"[INFO] 强制应用用户配置 (-u): user.name=[{target_user}], user.email=[{target_email}]")
+        return
+
+    # 情况 2: 用户未指定 -u 参数，执行智能提示与校验
     if not remote_user:
         return
 
-    # 获取本地 Git 仓库配置
     res_name = subprocess.run([git_bin, "config", "user.name"], capture_output=True, text=True)
     local_name = res_name.stdout.strip()
     
@@ -320,7 +337,7 @@ def check_and_fix_git_config(git_bin: str, remote_url: str):
         print(f"\n[WARN] 发现当前 Git 用户配置与远程目标不一致！")
         print(f"  -> 当前 Git 仓库配置: user.name=[{local_name or '未设置'}], user.email=[{local_email or '未设置'}]")
         print(f"  -> 远程目标 URL 用户: [{remote_user}]")
-        print(f"请选择本次 Commit 要使用的配置:")
+        print(f"请选择本次 Commit 要使用的配置 (直接带入 -u 即可跳过此询问):")
         print(f"  [1] 保持当前 Git 本地配置不变")
         print(f"  [2] 更新为远程目标用户名 ({remote_user})")
         
@@ -348,7 +365,8 @@ def check_and_fix_git_config(git_bin: str, remote_url: str):
 
 
 def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
-             commit_msg: str = "auto update", remote_url: str = ""):
+             commit_msg: str = "auto update", remote_url: str = "",
+             user_arg: str = None, retry_count: int = 10):
     print(f"\n[INFO] 当前工作目录: {repo_root.resolve()}")
 
     # 1. 检查是否已经 init (未初始化则自动初始化)
@@ -358,9 +376,8 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
         if remote_url:
             run_shell(git_bin, ["remote", "add", "origin", remote_url])
 
-    # 2. 检查配置与远程目标是否一致
-    if remote_url:
-        check_and_fix_git_config(git_bin, remote_url)
+    # 2. 检查并应用 Git 用户配置
+    apply_git_user_config(git_bin, remote_url, user_arg)
 
     # 3. 执行 add
     run_shell(git_bin, ["add", "-A"])
@@ -370,7 +387,7 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
     if result.returncode == 0 and result.stdout.strip():
         files = result.stdout.strip().split("\n")
         print(f"[INFO] 本次涉及变更的文件列表 ({len(files)} 个):")
-        for f in files[:10]: # 最多只打印前10个避免刷屏
+        for f in files[:10]:
             print(f"  {f}")
         if len(files) > 10:
             print(f"  ... 以及其他 {len(files) - 10} 个文件")
@@ -379,19 +396,32 @@ def git_push(git_bin: str, branch: str, repo_root: Path, extra_args: list[str],
 
     # 5. 检查是否有变更，有则 commit
     diff_check = run_shell(git_bin, ["diff", "--cached", "--quiet"])
-    # 针对新初始化的仓库，diff 可能返回 128 (no HEAD)，这种情况下我们也需要 commit
     if diff_check.returncode == 0:
         print("\n[INFO] 无变更，跳过 commit，直接尝试推送")
     else:
         run_shell(git_bin, ["commit", "-m", commit_msg])
 
-    # 6. 推送
-    print(f"\n===== 推送 {remote_url} {branch} =====")
+    # 6. 推送 (带自动重试防中断机制)
     cmd_args = ["push", "-v", "--progress"] + extra_args + [remote_url, branch]
-    push_res = run_shell(git_bin, cmd_args, realtime=True)
-    if push_res.returncode != 0:
-        print("[ERROR] git push 失败！")
-        sys.exit(1)
+    
+    for attempt in range(1, retry_count + 1):
+        print(f"\n===== 推送 {remote_url} {branch} (尝试 {attempt}/{retry_count}) =====")
+        try:
+            push_res = run_shell(git_bin, cmd_args, realtime=True)
+            if push_res.returncode == 0:
+                print("\n[INFO] ✅ 推送成功！")
+                break
+            else:
+                print(f"\n[WARN] ⚠️ 网络连接或推送失败 (返回码: {push_res.returncode})")
+        except Exception as e:
+            print(f"\n[WARN] ⚠️ 推送进程发生异常: {repr(e)}")
+            
+        if attempt < retry_count:
+            print("[INFO] 5秒后自动重试...")
+            time.sleep(5)
+        else:
+            print(f"\n[ERROR] ❌ 已达到最大重试次数 {retry_count}，终止操作。请检查网络。")
+            sys.exit(1)
 
 
 def git_list_big(git_bin: str, threshold_bytes: int) -> list[tuple[int, str, str]]:
@@ -499,6 +529,11 @@ def main():
     parser.add_argument("--remote", default="", help="完整远程 URL")
     parser.add_argument("--auth", help="认证信息 user:token")
     parser.add_argument("--commit-msg",'-m', default="auto update", help="自定义 commit 消息")
+    
+    # 新增参数: --user (-u) 与 --retry (-r)
+    parser.add_argument("--user", "-u", nargs="?", const="AUTO", default=None, help="自动配置 Git 用户。不带值默认取 remote 用户，无邮箱自动用 @users.noreply.github.com")
+    parser.add_argument("--retry", "-r", type=int, default=10, help="网络断开或 Push 失败时的重试次数 (默认 10)")
+    
     parser.add_argument("mode", choices=["push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"], help="操作模式")
 
     args, extra = parser.parse_known_args()
@@ -574,9 +609,9 @@ def main():
         if args.mode == "pull":
             git_pull(git_exe, args.branch, extra, remote_url)
         elif args.mode == "push":
-            git_push(git_exe, args.branch, repo_root, extra, args.commit_msg, remote_url)
+            git_push(git_exe, args.branch, repo_root, extra, args.commit_msg, remote_url, args.user, args.retry)
 
-        print("\n✅ 操作完成！")
+        print("\n✅ 操作结束！")
     except KeyboardInterrupt:
         print("\n[CANCEL] 用户手动终止程序。")
         sys.exit(130)
