@@ -437,7 +437,7 @@ def main():
     parser.add_argument("--hashes", "--hash", default="", help="手动要清理的 Blob Hash（多个用逗号隔开）")
     parser.add_argument("--remote", default="", help="完整远程 URL")
     parser.add_argument("--auth", help="认证信息 user:token")
-    parser.add_argument("--commit-msg",'-m', default="auto update", help="自定义 commit 消息")
+    parser.add_argument("--commit-msg",'-m', default="", help="自定义 commit 消息")
     parser.add_argument("--user", "-u", nargs="?", const="AUTO", default=None, help="自动配置 Git 用户")
     parser.add_argument("--retry", "-r", type=int, default=10, help="网络断开或 Push 失败时的重试次数 (默认 10)")
     parser.add_argument("mode", choices=["push", "pull", "init", "list-big", "listbig", "remove-big", "filter-repo"], help="操作模式")
